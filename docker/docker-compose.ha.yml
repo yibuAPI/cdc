@@ -17,10 +17,19 @@ x-kafka-common: &kafka-common
     KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
     # INTERNAL = 容器间；EXTERNAL = 宿主机 CK；CONTROLLER 内部仲裁保持 PLAINTEXT
     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
-    # ---- SASL（PLAIN 用户表）----
+    # ---- SASL ----
+    # broker 是服务端，必须给每个监听器单独配 JAAS（listener.name.<名>.plain.sasl.jaas.config）。
+    # 只配 KAFKA_SASL_JAAS_CONFIG 会映射成客户端 sasl.jaas.config，启动即失败：
+    #   Could not find a 'KafkaServer' or 'internal.KafkaServer' entry in the JAAS configuration
     KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
     KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
-    KAFKA_SASL_JAAS_CONFIG: >-
+    KAFKA_LISTENER_NAME_INTERNAL_PLAIN_SASL_JAAS_CONFIG: >-
+      org.apache.kafka.common.security.plain.PlainLoginModule required
+      username="${KAFKA_SASL_ADMIN_USER:-admin}"
+      password="${KAFKA_SASL_ADMIN_PASSWORD}"
+      user_${KAFKA_SASL_ADMIN_USER:-admin}="${KAFKA_SASL_ADMIN_PASSWORD}"
+      user_${KAFKA_SASL_USER:-cdc}="${KAFKA_SASL_PASSWORD}";
+    KAFKA_LISTENER_NAME_EXTERNAL_PLAIN_SASL_JAAS_CONFIG: >-
       org.apache.kafka.common.security.plain.PlainLoginModule required
       username="${KAFKA_SASL_ADMIN_USER:-admin}"
       password="${KAFKA_SASL_ADMIN_PASSWORD}"

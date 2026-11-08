@@ -133,6 +133,15 @@ def _kafka_settings_block(table: TableDef, settings: Settings, ck_major: int | N
         "format_avro_schema_registry_url": settings.schema_registry_url_for_ck,
     }
     lines = [f"    {k} = '{v}'" for k, v in quoted.items()]
+    # ---- Kafka SASL 认证（CK 22.x+ 均支持 kafka_sasl_* 设置）----
+    sasl = settings.kafka_sasl
+    if sasl.enabled:
+        # CK 的 security_protocol 取值与 Java 客户端不同：SASL_SSL → sasl_ssl
+        proto = "sasl_ssl" if sasl.security_protocol.upper() == "SASL_SSL" else "sasl_plaintext"
+        lines.append(f"    kafka_security_protocol = '{proto}'")
+        lines.append(f"    kafka_sasl_mechanism = '{sasl.mechanism}'")
+        lines.append(f"    kafka_sasl_username = '{sasl.username}'")
+        lines.append(f"    kafka_sasl_password = '{sasl.password}'")
     lines.append("    kafka_skip_broken_messages = 1")
     lines.append("    kafka_max_block_size = 65536")   # 大批量落盘，提升消费吞吐
     # 消费稳定性：单消费者(MV)就够(tasks.max=1→1分区)，poll batch 对齐 max_block_size

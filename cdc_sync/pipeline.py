@@ -102,7 +102,10 @@ def send_snapshot(settings, tables_cfg, only=None) -> int:
         raise ValueError("没有匹配的表")
     signal = {"type": "execute-snapshot", "data": {"type": "incremental", "data-collections": dcs}}
     brokers = [b.strip() for b in settings.kafka_internal_broker_list.split(",") if b.strip()]
-    producer = KafkaProducer(bootstrap_servers=brokers, retries=3, request_timeout_ms=15000)
+    producer = KafkaProducer(
+        bootstrap_servers=brokers, retries=3, request_timeout_ms=15000,
+        **settings.kafka_sasl.python_kwargs(),
+    )
     try:
         fut = producer.send("cdc-signals", key=b"mysql", value=json.dumps(signal).encode())
         fut.get(timeout=15)

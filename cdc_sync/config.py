@@ -89,9 +89,63 @@ class DebeziumConf:
 
 @dataclass
 class PanelConf:
-    """监控面板登录（单用户）。缺密码时 auth 回退内置默认值。"""
+    """监控面板登录（单用户）。
+
+    allow_default_password=False（默认）时，settings 里密码为空将拒绝启动/拒绝登录，
+    不再回退内置默认口令 —— 面板可能暴露到公网，默认口令等于没有鉴权。
+    """
     user: str = "root"
     password: str = ""
+    allow_default_password: bool = False
+
+
+@dataclass
+class KafkaSaslConf:
+    """Kafka 客户端 SASL 认证配置。
+
+    开启后必须同时提供 username/password；四个客户端（Connect worker、Debezium
+    连接器、ClickHouse Kafka 引擎、监控面板）共用同一份凭据，避免各写一套。
+
+    默认 PLAIN：KRaft 模式下 SCRAM 凭据必须在 kafka-storage format 时预置，
+    否则客户端无法登录（详见 docker/README.md「SASL 凭据」一节）。
+    """
+    enabled: bool = False
+    security_protocol: str = "SASL_PLAINTEXT"   # SASL_PLAINTEXT | SASL_SSL
+    mechanism: str = "PLAIN"                    # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+
+    username: str = ""
+    password: str = ""
+
+    def jaas_config(self) -> str:
+        """供 Java 客户端（Connect / Debezium）使用的 JAAS 串。"""
+        module = "org.apache.kafka.common.security.scram.ScramLoginModule" \
+            if self.mechanism.upper().startswith("SCRAM") \
+            else "org.apache.kafka.common.security.plain.PlainLoginModule"
+        # 密码中的引号需转义，避免拼出非法 JAAS 串
+        user = self.username.replace("\\", "\\\\").replace('"', '\\"')
+        pwd = self.password.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{module} required username="{user}" password="{pwd}";'
+
+    def connector_settings(self) -> dict:
+        """Debezium / Connect 连接器里的 SASL 属性（无认证时返回空 dict）。"""
+        if not self.enabled:
+            return {}
+        return {
+            "security.protocol": self.security_protocol,
+            "sasl.mechanism": self.mechanism,
+            "sasl.jaas.config": self.jaas_config(),
+        }
+
+    def python_kwargs(self) -> dict:
+        """kafka-python（Consumer/AdminClient/Producer）的关键字参数。"""
+        if not self.enabled:
+            return {}
+        return {
+            "security_protocol": self.security_protocol,
+            "sasl_mechanism": self.mechanism,
+            "sasl_plain_username": self.username,
+            "sasl_plain_password": self.password,
+        }
 
 
 @dataclass
@@ -100,9 +154,11 @@ class Settings:
     clickhouse: ClickHouseConf = field(default_factory=ClickHouseConf)
     kafka_broker_list: str = "kafka:9092"
     kafka_internal_broker_list: str = "kafka:9092"
+    kafka_sasl: KafkaSaslConf = field(default_factory=KafkaSaslConf)
     schema_registry_url: str = "http://schema-registry:8081"
     schema_registry_url_for_ck: str = "http://localhost:8081"
     connect_url: str = "http://connect:8083"
+    # Connect REST 未做鉴权时，公网必须靠反代挡；此处仅供 CLI/面板内网直连
     debezium: DebeziumConf = field(default_factory=DebeziumConf)
     panel: PanelConf = field(default_factory=PanelConf)
 
@@ -165,18 +221,30 @@ def build_settings(raw: dict) -> Settings:
     )
     sr = raw.get("schema_registry") or {}
     panel = raw.get("panel") or {}
+    sasl = kafka.get("sasl") or {}
     return Settings(
         mysql=mysql,
         clickhouse=clickhouse,
         kafka_broker_list=broker_list,
         # 容器内组件（Connect history / 监控）用的内部地址；缺省回退宿主地址
         kafka_internal_broker_list=kafka.get("internal_broker_list", broker_list),
+        kafka_sasl=KafkaSaslConf(
+            enabled=_as_bool(sasl.get("enabled"), False),
+            security_protocol=(sasl.get("security_protocol") or "SASL_PLAINTEXT").strip(),
+            mechanism=(sasl.get("mechanism") or "SCRAM-SHA-512").strip(),
+            username=sasl.get("username") or "",
+            password=sasl.get("password") or "",
+        ),
         schema_registry_url=sr.get("url", "http://schema-registry:8081"),
         # CK(宿主机原生) 用的 Schema Registry 地址；缺省宿主机映射端口
         schema_registry_url_for_ck=sr.get("url_for_ck", "http://localhost:8081"),
         connect_url=(raw.get("connect") or {}).get("url", "http://connect:8083"),
         debezium=debezium,
-        panel=PanelConf(user=panel.get("user", "root"), password=panel.get("password", "")),
+        panel=PanelConf(
+            user=panel.get("user", "root"),
+            password=panel.get("password", ""),
+            allow_default_password=_as_bool(panel.get("allow_default_password"), False),
+        ),
     )
 
 

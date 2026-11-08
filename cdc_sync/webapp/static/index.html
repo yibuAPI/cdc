@@ -199,20 +199,6 @@
 
   <footer class="muted">cdc_sync · 监控面板</footer>
 
-  <!-- 风险确认弹窗 -->
-  <div id="riskModal" class="modal-backdrop" style="display:none">
-    <div class="modal risk-modal-box">
-      <div class="risk-modal-icon">⚠️</div>
-      <h2 style="color:var(--warn)">高风险操作确认</h2>
-      <p class="muted" style="text-align:center;margin:0">AI 检测到该语句包含高风险操作，执行后<strong style="color:var(--warn)">无法撤销</strong>，本次操作将记录到告警日志。</p>
-      <div class="risk-reason" id="riskReason"></div>
-      <pre class="risk-sql-preview" id="riskSqlPreview"></pre>
-      <div class="actions" style="justify-content:center;gap:12px">
-        <button id="riskCancelBtn" class="btn" style="min-width:90px">取消</button>
-        <button id="riskConfirmBtn" class="btn warn" style="min-width:90px">确认执行</button>
-      </div>
-    </div>
-  </div>
 
   <script src="/app.js"></script>
 </body>

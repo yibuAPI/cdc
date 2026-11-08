@@ -208,7 +208,7 @@ async function loadAlerts() {
     const typeLabel = ALERT_TYPE_LABELS[r.type] || r.type || '—';
     const actionLabel = ALERT_ACTION_LABELS[r.action] || r.action || '—';
     const sqlCell = r.sql
-      ? `<button class="btn small" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none';this.textContent=this.textContent==='查看'?'收起':'查看'">查看</button><pre class="risk-sql-preview" style="display:none;margin-top:6px">${esc(r.sql)}</pre>`
+      ? `<button class="btn small js-toggle-sql">查看</button><pre class="sql-preview" style="display:none;margin-top:6px">${esc(r.sql)}</pre>`
       : '—';
     html += `<tr>
       <td style="white-space:nowrap">${esc(r.time)}</td>
@@ -222,6 +222,16 @@ async function loadAlerts() {
   }
   html += `</table>`;
   box.innerHTML = html;
+  // 事件委托展开/收起 SQL（CSP 已禁用内联 onclick）
+  box.querySelectorAll('.js-toggle-sql').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const pre = btn.nextElementSibling;
+      if (!pre) return;
+      const open = pre.style.display === 'none';
+      pre.style.display = open ? '' : 'none';
+      btn.textContent = open ? '收起' : '查看';
+    });
+  });
 }
 
 // ---------------- 刷新调度 ----------------
@@ -297,6 +307,11 @@ const SETTINGS_SCHEMA = [
   ['kafka', 'Kafka', [
     ['broker_list', 'CK消费用 broker(宿主机地址)', 'text'],
     ['internal_broker_list', '容器内 broker(kafka:9092)', 'text'],
+    ['sasl.enabled', '启用 SASL 认证', 'bool'],
+    ['sasl.security_protocol', '协议 (SASL_PLAINTEXT / SASL_SSL)', 'text'],
+    ['sasl.mechanism', '机制 (SCRAM-SHA-512 / SCRAM-SHA-256)', 'text'],
+    ['sasl.username', '用户名', 'text'],
+    ['sasl.password', '密码', 'password'],
   ]],
   ['schema_registry', 'Schema Registry', [['url', 'URL(容器内)', 'text'], ['url_for_ck', 'URL(CK宿主机用)', 'text']]],
   ['connect', 'Kafka Connect', [['url', 'REST URL', 'text']]],
@@ -307,13 +322,23 @@ const SETTINGS_SCHEMA = [
   ]],
   ['panel', '监控面板登录', [
     ['user', '用户名', 'text'], ['password', '密码', 'password'],
-  ]],
-  ['ai', 'AI 风险检测', [
-    ['url', 'API 地址 (到 /v1)', 'text'],
-    ['key', 'API Key', 'password'],
-    ['model', '模型名', 'text'],
+    ['allow_default_password', '允许平台默认口令(仅本地调试)', 'bool'],
   ]],
 ];
+
+// 支持 'sasl.enabled' 这类点号嵌套键
+function getPath(obj, path) {
+  return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+function setPath(obj, path, value) {
+  const parts = path.split('.');
+  let cur = obj;
+  for (const k of parts.slice(0, -1)) {
+    if (typeof cur[k] !== 'object' || cur[k] === null) cur[k] = {};
+    cur = cur[k];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
 
 // 可测试连通性的分组 → 测试端点组件名
 const TESTABLE = new Set(['mysql', 'clickhouse', 'kafka', 'schema_registry', 'connect']);
@@ -330,7 +355,7 @@ async function loadSettings() {
       : '';
     html += `<fieldset><legend>${esc(title)} ${testBtn}</legend><div class="cfgrow">`;
     for (const [key, label, type] of fields) {
-      const val = (d[group] || {})[key];
+      const val = getPath(d[group] || {}, key);
       const id = `cfg-${group}-${key}`;
       if (type === 'bool') {
         html += `<label>${esc(label)} <input type="checkbox" id="${id}" ${val ? 'checked' : ''}></label>`;
@@ -381,9 +406,11 @@ function collectSettings() {
     for (const [key, , type] of fields) {
       const el = document.getElementById(`cfg-${group}-${key}`);
       if (!el) continue;
-      if (type === 'bool') out[group][key] = el.checked;
-      else if (type === 'number') out[group][key] = el.value === '' ? null : Number(el.value);
-      else out[group][key] = el.value;
+      let v;
+      if (type === 'bool') v = el.checked;
+      else if (type === 'number') v = el.value === '' ? null : Number(el.value);
+      else v = el.value;
+      setPath(out[group], key, v);
     }
   }
   return out;
@@ -455,35 +482,6 @@ async function runQuery() {
   if (!sql) { msg.textContent = '请输入查询语句'; msg.className = 'action-msg err'; return; }
   localStorage.setItem('cdc_last_query', sql);
 
-  // AI 风险检测
-  msg.textContent = 'AI 检测中…'; msg.className = 'action-msg';
-  box.innerHTML = '<span class="muted">检测中…</span>';
-  try {
-    const chk = await fetchAuth('/api/ai/check', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sql }),
-    }).then((x) => x.json());
-    if (chk.ok && chk.data && chk.data.risk && !chk.data.skipped) {
-      // 高风险：弹二次确认
-      const confirmed = await showRiskConfirm(chk.data.reason || '该语句包含高风险操作', sql);
-      if (!confirmed) {
-        msg.textContent = '已取消'; msg.className = 'action-msg';
-        box.innerHTML = '';
-        return;
-      }
-      // 用户确认 → 记录告警
-      await fetchAuth('/api/alerts/record', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'risky_query', action: 'confirmed_execute',
-          detail: `用户确认执行高风险 SQL（AI 判断：${chk.data.reason || '未知'}）`,
-          sql,
-        }),
-      }).catch(() => {});
-      loadAlerts();
-    }
-  } catch (_) { /* AI 检测失败不阻断查询 */ }
-
   msg.textContent = '执行中…'; msg.className = 'action-msg';
   box.innerHTML = '<span class="muted">查询中…</span>';
   const r = await fetchAuth('/api/query', {
@@ -503,24 +501,6 @@ async function runQuery() {
 }
 
 // 风险确认弹窗（返回 Promise<boolean>）
-function showRiskConfirm(reason, sql) {
-  return new Promise((resolve) => {
-    const modal = $('#riskModal');
-    $('#riskReason').textContent = reason;
-    $('#riskSqlPreview').textContent = sql.length > 200 ? sql.slice(0, 200) + '…' : sql;
-    modal.style.display = 'flex';
-    function cleanup() {
-      modal.style.display = 'none';
-      $('#riskConfirmBtn').removeEventListener('click', onConfirm);
-      $('#riskCancelBtn').removeEventListener('click', onCancel);
-    }
-    function onConfirm() { cleanup(); resolve(true); }
-    function onCancel()  { cleanup(); resolve(false); }
-    $('#riskConfirmBtn').addEventListener('click', onConfirm);
-    $('#riskCancelBtn').addEventListener('click', onCancel);
-  });
-}
-
 async function loadSavedQueries() {
   const box = $('#savedQueries');
   const res = await getJSON('/api/queries');

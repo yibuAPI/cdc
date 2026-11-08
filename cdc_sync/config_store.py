@@ -30,12 +30,22 @@ def active_tables_path() -> Path:
 _EMPTY_SETTINGS = {
     "mysql": {"host": "", "port": 3306, "user": "debezium", "password": "", "charset": "utf8mb4"},
     "clickhouse": {"host": "", "port": 8123, "user": "default", "password": "", "database": "default", "secure": False},
-    "kafka": {"broker_list": "localhost:9094", "internal_broker_list": "kafka1:9092"},
+    "kafka": {
+        "broker_list": "localhost:9094",
+        "internal_broker_list": "kafka:9092",
+        "sasl": {
+            "enabled": False,
+            "security_protocol": "SASL_PLAINTEXT",
+            "mechanism": "SCRAM-SHA-512",
+            "username": "",
+            "password": "",
+        },
+    },
     "schema_registry": {"url": "http://schema-registry:8081", "url_for_ck": "http://localhost:8081"},
     "connect": {"url": "http://connect:8083"},
     "debezium": {"connector_name": "cdc-connector", "server_name": "cdc", "server_id": 1001,
                  "tasks_max": 4, "snapshot_mode": "initial", "history_topic": "schema-changes.cdc"},
-    "panel": {"user": "root", "password": ""},
+    "panel": {"user": "root", "password": "", "allow_default_password": False},
 }
 
 
@@ -112,13 +122,24 @@ def seed_settings_from(env_template: Path | str, *, force: bool = False) -> tupl
                   "password": s.mysql.password, "charset": s.mysql.charset},
         "clickhouse": {"host": s.clickhouse.host, "port": s.clickhouse.port, "user": s.clickhouse.user,
                        "password": s.clickhouse.password, "database": s.clickhouse.database, "secure": s.clickhouse.secure},
-        "kafka": {"broker_list": s.kafka_broker_list, "internal_broker_list": s.kafka_internal_broker_list},
+        "kafka": {
+            "broker_list": s.kafka_broker_list,
+            "internal_broker_list": s.kafka_internal_broker_list,
+            "sasl": {
+                "enabled": s.kafka_sasl.enabled,
+                "security_protocol": s.kafka_sasl.security_protocol,
+                "mechanism": s.kafka_sasl.mechanism,
+                "username": s.kafka_sasl.username,
+                "password": s.kafka_sasl.password,
+            },
+        },
         "schema_registry": {"url": s.schema_registry_url, "url_for_ck": s.schema_registry_url_for_ck},
         "connect": {"url": s.connect_url},
         "debezium": {"connector_name": s.debezium.connector_name, "server_name": s.debezium.server_name,
                      "server_id": s.debezium.server_id, "tasks_max": s.debezium.tasks_max,
                      "snapshot_mode": s.debezium.snapshot_mode, "history_topic": s.debezium.history_topic},
-        "panel": {"user": s.panel.user, "password": s.panel.password},
+        "panel": {"user": s.panel.user, "password": s.panel.password,
+                  "allow_default_password": s.panel.allow_default_password},
     }
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")

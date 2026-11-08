@@ -16,6 +16,7 @@ from .config import Settings, TableDef
 def build_connector(tables: list[TableDef], settings: Settings) -> dict:
     dbz = settings.debezium
     my = settings.mysql
+    sasl = settings.kafka_sasl
 
     databases = sorted({t.source_database for t in tables})
     table_list = sorted({f"{t.source_database}.{t.source_table}" for t in tables})
@@ -82,6 +83,13 @@ def build_connector(tables: list[TableDef], settings: Settings) -> dict:
         "transforms.unwrap.add.fields": "op,source.ts_ms",
         "transforms.unwrap.add.fields.prefix": "__",
     }
+
+    if sasl.enabled:
+        # ---- Kafka SASL：连接器自身产消息 + schema 历史 + 增量快照信号三处都要带凭据 ----
+        for prefix in ("producer.override.", "schema.history.internal.producer.",
+                       "schema.history.internal.consumer.", "signal.kafka."):
+            for key, value in sasl.connector_settings().items():
+                config[f"{prefix}{key}"] = value
 
     return {"name": dbz.connector_name, "config": config}
 

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import yaml
 
-from .. import config_store
+from .. import config, config_store
 
 log = logging.getLogger("cdc_sync.auth")
 
@@ -35,9 +35,12 @@ log = logging.getLogger("cdc_sync.auth")
 # 单次登录默认有效 12 小时；可用 CDC_PANEL_SESSION_SECONDS(秒)覆盖
 SESSION_SECONDS = int(os.environ.get("CDC_PANEL_SESSION_SECONDS", str(12 * 3600)))
 COOKIE_NAME = "cdc_panel_session"
-COOKIE_SECURE = os.environ.get("CDC_PANEL_COOKIE_SECURE", "0") == "1"
+# 面板可能经反代暴露到公网，默认按 HTTPS 处理（Cookie 只在 TLS 连接上发送）。
+# 纯内网 http 直连调试时可显式置 CDC_PANEL_COOKIE_SECURE=0。
+COOKIE_SECURE = os.environ.get("CDC_PANEL_COOKIE_SECURE", "1") == "1"
 
-# 回退内置凭据(settings.yaml 无 panel 段 / 密码为空时用)
+# 回退内置凭据仅用于本地开发；可通过 allow_default_password 显式开启。
+# 生产（尤其公网暴露）必须配置真实密码，否则拒绝登录。
 DEFAULT_USER = "root"
 DEFAULT_PASSWORD = "cdc@123"
 
@@ -143,33 +146,63 @@ _load_alerts_from_file()
 
 
 
-def _credentials() -> tuple[str, str]:
-    """当前生效的 (username, password)。
-
-    每次调用重读 settings.yaml，让网页「配置」页的改动即时生效；
-    文件缺失/解析失败/密码为空时回退内置默认值，保证面板能先登录进去。
-    """
+def _panel_conf() -> dict:
+    """当前生效的 panel 段（每次重读 settings.yaml，网页改动即时生效）。"""
     try:
-        s = config_store.read_settings_dict()
-        panel = s.get("panel") or {}
-        user = (panel.get("user") or "").strip() or DEFAULT_USER
-        password = panel.get("password") or ""
-        return user, (password if password else DEFAULT_PASSWORD)
+        return (config_store.read_settings_dict().get("panel") or {})
     except Exception:  # noqa: BLE001
-        return DEFAULT_USER, DEFAULT_PASSWORD
+        return {}
+
+
+def _allow_default_password(panel: dict | None = None) -> bool:
+    panel = panel if panel is not None else _panel_conf()
+    return config._as_bool(panel.get("allow_default_password"), False)
+
+
+def password_configured() -> bool:
+    """是否已配置真实面板密码（或显式允许默认口令）。"""
+    panel = _panel_conf()
+    pw = (panel.get("password") or "").strip()
+    # 未解析的 ${ENV} 占位符不算已配置，避免把占位串当密码用
+    if pw and not (pw.startswith("${") and pw.endswith("}")):
+        return True
+    return _allow_default_password(panel)
+
+
+def _credentials() -> tuple[str, str] | None:
+    """当前生效的 (username, password)；未配置密码且未允许默认口令时返回 None。
+
+    面板可能直接暴露到公网，内置默认口令等于没有鉴权，因此默认拒绝：
+    只有 settings 里配了非空密码，或显式设置 allow_default_password: true 才放行。
+    """
+    panel = _panel_conf()
+    user = (panel.get("user") or "").strip() or DEFAULT_USER
+    password = (panel.get("password") or "").strip()
+    if password:
+        return user, password
+    if _allow_default_password(panel):
+        return user, DEFAULT_PASSWORD
+    return None
 
 
 def verify_password(username: str, password: str) -> bool:
-    """常量时间比对，防时序侧信道。"""
-    user, pw = _credentials()
+    """常量时间比对，防时序侧信道。未配置密码时一律拒绝。"""
+    creds = _credentials()
+    if creds is None:
+        return False
+    user, pw = creds
     user_ok = hmac.compare_digest(username.encode("utf-8"), user.encode("utf-8"))
     pw_ok = hmac.compare_digest(password.encode("utf-8"), pw.encode("utf-8"))
     return user_ok and pw_ok
 
 
 def _key() -> bytes:
-    """以当前密码推导签名密钥。改密码 => 旧 token 签名对不上 => 全员强制下线。"""
-    _, pw = _credentials()
+    """以当前密码推导签名密钥。改密码 => 旧 token 签名对不上 => 全员强制下线。
+
+    未配置密码时用一个固定的无效密钥：既不签发可用 token，也让已存在的 token 全部失效。
+    """
+    creds = _credentials()
+    pw = creds[1] if creds else "\x00no-panel-password\x00"
     return hashlib.sha256(("cdc-panel:" + pw).encode("utf-8")).digest()
 
 

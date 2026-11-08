@@ -50,6 +50,21 @@ async def _no_cache_static(request: Request, call_next):
 
 
 @app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """公网可达页面统一加安全响应头（纵深防御：配合反代 TLS 使用）。"""
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+    )
+    return resp
+
+
+@app.middleware("http")
 async def _require_login(request: Request, call_next):
     """除公开端点外的所有 /api/* 需携带有效会话 Cookie，否则返回 401。
 
@@ -65,6 +80,20 @@ async def _require_login(request: Request, call_next):
     if not token or not auth.validate_token(token):
         return JSONResponse({"ok": False, "error": "未登录或会话已过期", "auth": True}, status_code=401)
     return await call_next(request)
+
+
+def _client_ip(request: Request) -> str:
+    """取客户端 IP。
+
+    默认只信直连对端地址（request.client.host）。X-Forwarded-For 可被客户端伪造，
+    只有在 CDC_TRUST_FORWARDED_FOR=1（确认前面就是本机反代）时才采信其最左值，
+    否则攻击者可伪造该头打散失败计数、绕过暴力破解检测。
+    """
+    if os.environ.get("CDC_TRUST_FORWARDED_FOR", "0") == "1":
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def _settings_path() -> str | None:
@@ -112,17 +141,19 @@ async def api_login(request: Request):
     """校验用户名+密码，成功则签发会话 Cookie。body: {username, password}"""
     try:
         body = await request.json()
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse({"ok": False, "error": f"请求体非法 JSON：{e}", "auth": True}, status_code=400)
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "请求体非法 JSON", "auth": True}, status_code=400)
+    # 未配置密码（且未允许默认口令）时直接拒绝，避免公网默认口令可登录
+    if not auth.password_configured():
+        return JSONResponse(
+            {"ok": False, "error": "面板未设置密码，请先在 config/settings.yaml 的 panel.password 配置",
+             "auth": True},
+            status_code=403,
+        )
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
     if not auth.verify_password(username, password):
-        # 取真实客户端 IP（支持反代 X-Forwarded-For）
-        forwarded = request.headers.get("X-Forwarded-For")
-        client_ip = forwarded.split(",")[0].strip() if forwarded else (
-            request.client.host if request.client else "unknown"
-        )
-        auth.record_fail(client_ip)
+        auth.record_fail(_client_ip(request))
         return JSONResponse({"ok": False, "error": "用户名或密码错误", "auth": True}, status_code=401)
     token = auth.issue_token(username)
     resp = JSONResponse({"ok": True, "data": {"username": username}})
@@ -155,16 +186,15 @@ async def api_record_alert(request: Request):
 
     try:
         body = await request.json()
-    except Exception as e:  # noqa: BLE001
-        return _err(f"请求体非法 JSON：{e}")
-    ip = (request.client.host if request.client else "") or ""
+    except Exception:  # noqa: BLE001
+        return _err("请求体非法 JSON")
     token = request.cookies.get(auth.COOKIE_NAME, "")
     username = auth.validate_token(token) if token else ""
     entry = {
         "time": datetime.now(auth._TZ_CST).strftime("%Y-%m-%d %H:%M:%S"),
         "type": body.get("type", "risky_query"),
         "action": body.get("action", "confirmed_execute"),
-        "ip": ip,
+        "ip": _client_ip(request),
         "user": username or "—",
         "detail": body.get("detail", ""),
         "sql": (body.get("sql") or "")[:500],
@@ -172,79 +202,6 @@ async def api_record_alert(request: Request):
     auth.record_alert(entry)
     return _ok({"recorded": True})
 
-
-@app.post("/api/ai/check")
-async def api_ai_check(request: Request):
-    """用 AI 检测 SQL 风险。配置 settings.yaml 的 ai 段后生效；未配置时跳过(返回 skipped)。"""
-    import json as _json
-    import urllib.request as _req
-    import urllib.error
-    try:
-        body = await request.json()
-    except Exception as e:  # noqa: BLE001
-        return _err(f"请求体非法 JSON：{e}")
-    sql = (body.get("sql") or "").strip()
-    if not sql:
-        return _err("sql 为空")
-    try:
-        s = config_store.read_settings_dict()
-        ai_cfg = s.get("ai") or {}
-        base_url = (ai_cfg.get("url") or "").rstrip("/")
-        api_key = ai_cfg.get("key") or ""
-        model = ai_cfg.get("model") or "gpt-4o-mini"
-    except Exception as e:  # noqa: BLE001
-        return _err(f"配置读取失败：{e}")
-    if not base_url or not api_key:
-        return _ok({"risk": False, "skipped": True, "reason": "AI 未配置"})
-    prompt = (
-        "你是一个数据库安全审计助手。请严格按照以下规则判断 SQL 语句是否属于高风险操作。\n\n"
-        "【高风险（risk=true）】——以下任何一条满足即为高风险，必须返回 risk=true：\n"
-        "1. 增：INSERT、REPLACE、LOAD DATA、IMPORT\n"
-        "2. 删：DELETE、DROP、TRUNCATE\n"
-        "3. 改：UPDATE、ALTER、RENAME、MODIFY\n"
-        "4. 权限与结构：CREATE、GRANT、REVOKE、CALL、EXECUTE、MERGE\n"
-        "5. 任何会导致数据写入、数据删除、表结构变更、权限变更的操作\n"
-        "6. 批量操作或不带 WHERE 条件的 UPDATE/DELETE\n\n"
-        "【低风险（risk=false）】——仅以下情况才是低风险：\n"
-        "纯只读查询：SELECT（不含子查询写操作）、SHOW、EXPLAIN、DESCRIBE\n\n"
-        "判断原则：宁可误报，不可漏报。只要语句涉及增、删、改或其他任何非只读操作，一律返回 risk=true。\n\n"
-        "请只返回如下 JSON，不要有任何多余内容：\n"
-        '{"risk": true/false, "level": "high"/"low", "reason": "一句话说明风险原因"}\n\n'
-        f"SQL：\n{sql}"
-    )
-    payload = _json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 120,
-        "temperature": 0,
-    }).encode("utf-8")
-    api_url = f"{base_url}/chat/completions"
-    http_req = _req.Request(
-        api_url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-    try:
-        with _req.urlopen(http_req, timeout=15) as resp:
-            resp_body = _json.loads(resp.read().decode("utf-8"))
-        text = resp_body["choices"][0]["message"]["content"].strip()
-        # 提取 JSON（模型可能在前后多输出内容）
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            result = _json.loads(text[start:end])
-        else:
-            result = {"risk": False, "level": "low", "reason": text}
-        return _ok(result)
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")[:300]
-        return _err(f"AI API 返回 {e.code}：{err_body}")
-    except Exception as e:  # noqa: BLE001
-        return _err(f"AI 请求失败：{e}")
 
 @app.get("/api/connectors")
 def api_connectors():

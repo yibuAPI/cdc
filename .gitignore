@@ -28,3 +28,12 @@ config/alerts.yaml
 config/schema_cache.json
 config/saved_queries.json
 config/ui_state.json
+
+# TLS 证书与私钥（反代用，含私钥绝不入库）
+docker/certs/
+docker/cert*/
+*.pem
+*.key
+
+# 离线镜像包（离线部署产物，体积大，不入库）
+docker/offline/

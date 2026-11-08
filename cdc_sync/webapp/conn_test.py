@@ -124,11 +124,14 @@ def test_kafka(s: Settings) -> dict:
     if not up:
         return _r(False, f"全部 broker 不可达：{', '.join(brokers)}")
 
-    # 拉元数据确认可用 broker / topic 数
+    # 拉元数据确认可用 broker / topic 数（Kafka 开 SASL 时握手也要带凭据）
     meta = {}
     try:
         from kafka import KafkaConsumer
-        c = KafkaConsumer(bootstrap_servers=up, request_timeout_ms=6000, consumer_timeout_ms=6000)
+        c = KafkaConsumer(
+            bootstrap_servers=up, request_timeout_ms=6000, consumer_timeout_ms=6000,
+            **s.kafka_sasl.python_kwargs(),
+        )
         try:
             meta["brokers"] = len(list(c.cluster.brokers()))
             meta["topics"] = len(c.topics())

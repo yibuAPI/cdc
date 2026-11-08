@@ -253,21 +253,15 @@ details[open] .ts-collapse-summary { margin-bottom: 16px; }
 .ts-fmt-label { color: var(--text-muted); }
 .ts-fmt-val   { color: var(--text); font-variant-numeric: tabular-nums; font-family: "Cascadia Code", Consolas, monospace; }
 
-/* === Risk confirm modal === */
-.risk-modal-box { max-width: 480px; gap: 14px; }
-.risk-modal-icon { font-size: 32px; text-align: center; }
-.risk-reason {
-  background: var(--warn-subtle); border: 1px solid var(--warn);
-  border-radius: var(--radius-sm); padding: 10px 14px;
-  font-size: 13px; color: var(--warn);
-}
-.risk-sql-preview {
+/* 告警表格中的 SQL 展开预览 */
+.sql-preview {
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: var(--radius-sm); padding: 10px 14px;
   font-size: 12px; font-family: "Cascadia Code", Consolas, monospace;
   color: var(--text-muted); white-space: pre-wrap; word-break: break-all;
   margin: 0; max-height: 120px; overflow-y: auto;
 }
+
 body {
   margin: 0;
   background: var(--bg);

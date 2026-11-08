@@ -22,6 +22,14 @@ clickhouse:
 kafka:
   broker_list: kafka:9092           # CK Kafka 引擎与 Debezium 使用
   # 生成 CK Kafka 表 / 连接器时写入
+  internal_broker_list: kafka:9092  # 容器内组件（连接器 history / 监控 lag）
+  # SASL 认证（生产必开）：Connect / Debezium / CK Kafka 引擎 / 监控面板 共用此账号
+  sasl:
+    enabled: true
+    security_protocol: SASL_PLAINTEXT   # SASL_PLAINTEXT | SASL_SSL
+    mechanism: PLAIN                    # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+    username: ${KAFKA_SASL_USER}
+    password: ${KAFKA_SASL_PASSWORD}
 
 schema_registry:
   url: http://schema-registry:8081
@@ -38,14 +46,10 @@ debezium:
   snapshot_mode: initial
   history_topic: schema-changes.mysql-business
 
-# 监控面板登录（单用户，密码可留空则回退内置默认 cdc@123，也可用 ${ENV_VAR} 引用）
+# 监控面板登录（单用户）。
+# 密码留空将拒绝登录（不再回退内置默认口令），必须配置强密码或用 ${ENV_VAR} 引用。
+# 仅本地调试若确实要用内置默认口令，可显式设置 allow_default_password: true。
 panel:
   user: root
   password: ${CDC_PANEL_PASSWORD}
-
-# AI 风险检测（可选）：查询页执行 SQL 前先调 AI 判断风险，高风险弹二次确认并记录告警
-# 兼容 OpenAI 格式的 API（如 OpenAI、Azure OpenAI、Claude API via proxy、本地 Ollama 等）
-ai:
-  url: https://api.openai.com/v1   # API 地址（到 /v1，不含 /chat/completions）
-  key: ${AI_API_KEY}               # API Key
-  model: gpt-4o-mini               # 模型名，如 gpt-4o、claude-sonnet-5 等
+  allow_default_password: false

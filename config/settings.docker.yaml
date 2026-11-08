@@ -23,6 +23,13 @@ kafka:
   broker_list: ${KAFKA_BROKER_FOR_CK}
   # 容器内组件（连接器 history / 监控 lag）用：docker 网络内地址
   internal_broker_list: ${KAFKA_INTERNAL_BROKER}
+  # SASL 认证：Connect / Debezium / CK Kafka 引擎 / 监控面板 共用此账号
+  sasl:
+    enabled: true
+    security_protocol: SASL_PLAINTEXT
+    mechanism: PLAIN
+    username: ${KAFKA_SASL_USER:-cdc}
+    password: ${KAFKA_SASL_PASSWORD}
 
 schema_registry:
   url: ${SCHEMA_REGISTRY_URL}
@@ -42,3 +49,5 @@ debezium:
 panel:
   user: ${CDC_PANEL_USER:-root}
   password: ${CDC_PANEL_PASSWORD:-}
+  # 生产/公网暴露必须为 false：密码为空时直接拒绝登录，不回退默认口令
+  allow_default_password: false

@@ -49,6 +49,8 @@ def topic_lag(settings: Settings, tables: list[TableDef]) -> list[dict]:
         return [{"error": "缺少依赖 kafka-python"}]
 
     results: list[dict] = []
+    # Kafka 开启 SASL 后，Consumer/AdminClient 都必须带凭据，否则握手即失败
+    sasl_kwargs = settings.kafka_sasl.python_kwargs()
 
     consumer = None
     admin = None
@@ -58,10 +60,12 @@ def topic_lag(settings: Settings, tables: list[TableDef]) -> list[dict]:
             enable_auto_commit=False,
             request_timeout_ms=8000,
             consumer_timeout_ms=8000,
+            **sasl_kwargs,
         )
         admin = KafkaAdminClient(
             bootstrap_servers=broker,
             request_timeout_ms=8000,
+            **sasl_kwargs,
         )
     except Exception as e:  # noqa: BLE001
         return [{"error": f"连接 Kafka 失败 {broker} — {e}"}]

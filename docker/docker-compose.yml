@@ -5,6 +5,11 @@
 #
 # 单节点 Kafka(KRaft)，含堆内存限制，约 3~4G 内存即可跑。
 # 需要高可用(RF=3, 容忍单节点故障)时改用：docker compose -f docker-compose.ha.yml up -d --build
+#
+# 【安全默认】
+#   - Kafka 全链路 SASL_PLAINTEXT + PLAIN（broker 间、Schema Registry、Connect、
+#     Debezium、CK Kafka 引擎、监控面板 全部带凭据）。
+#   - 除 nginx 反代(443) 外，所有端口只绑定 127.0.0.1，公网仅暴露一个 HTTPS 页面。
 # =============================================================
 services:
 
@@ -13,16 +18,28 @@ services:
     image: confluentinc/cp-kafka:7.6.1
     container_name: cdc-kafka
     ports:
-      - "9094:9094"          # 宿主机映射：原生 ClickHouse 用 localhost:9094 消费
+      # 仅回环：宿主机原生 ClickHouse 用 127.0.0.1:9094 消费，公网不可达
+      - "127.0.0.1:9094:9094"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9094
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://${KAFKA_ADVERTISED_HOST:-localhost}:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      # INTERNAL = 容器间（Connect/SR/监控）；EXTERNAL = 宿主机 CK
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://${KAFKA_ADVERTISED_HOST:-localhost}:9094
+      # controller(内部仲裁) 保持 PLAINTEXT，broker 对客户端两个监听器都走 SASL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # ---- SASL（PLAIN 用户表由 KAFKA_SASL_JAAS_CONFIG 提供）----
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+      KAFKA_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="${KAFKA_SASL_ADMIN_USER:-admin}"
+        password="${KAFKA_SASL_ADMIN_PASSWORD}"
+        user_${KAFKA_SASL_ADMIN_USER:-admin}="${KAFKA_SASL_ADMIN_PASSWORD}"
+        user_${KAFKA_SASL_USER:-cdc}="${KAFKA_SASL_PASSWORD}";
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -37,7 +54,8 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      # 开 SASL 后 kafka-broker-api-versions 需凭据文件，这里只做端口连通性探测
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9092'"]
       interval: 15s
       timeout: 10s
       retries: 12
@@ -50,10 +68,17 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "8081:8081"
+      # 仅回环：CK(宿主机原生) 读 schema 用 127.0.0.1:8081
+      - "127.0.0.1:8081:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      # 连 SASL 化的 broker（Kafka Store 侧凭据）
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: SASL_PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM: PLAIN
+      SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="${KAFKA_SASL_USER:-cdc}" password="${KAFKA_SASL_PASSWORD}";
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
       SCHEMA_REGISTRY_HEAP_OPTS: "-Xmx384M"
@@ -76,9 +101,16 @@ services:
       schema-registry:
         condition: service_started
     ports:
-      - "8083:8083"
+      # 仅回环：Connect REST 无鉴权，绝不能暴露公网
+      - "127.0.0.1:8083:8083"
     environment:
       CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      # ---- worker 连 broker 的 SASL 凭据（内部存储 topic / 偏移 / 状态）----
+      CONNECT_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_SASL_MECHANISM: PLAIN
+      CONNECT_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="${KAFKA_SASL_USER:-cdc}" password="${KAFKA_SASL_PASSWORD}";
       CONNECT_REST_ADVERTISED_HOST_NAME: connect
       CONNECT_REST_PORT: 8083
       CONNECT_GROUP_ID: cdc-connect-cluster
@@ -117,8 +149,13 @@ services:
         condition: service_started
     env_file:
       - .env
+    environment:
+      # 面板经反代对外，Cookie 只在 HTTPS 上发送；反代与面板同机，故信任其 X-Forwarded-For
+      CDC_PANEL_COOKIE_SECURE: "1"
+      CDC_TRUST_FORWARDED_FOR: "1"
     ports:
-      - "${MONITOR_PORT:-8080}:8000"
+      # 只绑回环：公网流量一律经 nginx(443) 进来
+      - "127.0.0.1:${MONITOR_PORT:-8080}:8000"
     extra_hosts:
       # 让容器用 host.docker.internal 访问宿主机上的原生 ClickHouse
       - "host.docker.internal:host-gateway"
